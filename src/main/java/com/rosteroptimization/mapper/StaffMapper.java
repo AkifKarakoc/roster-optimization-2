@@ -8,7 +8,10 @@ import com.rosteroptimization.entity.Qualification;
 import com.rosteroptimization.repository.DepartmentRepository;
 import com.rosteroptimization.repository.SquadRepository;
 import com.rosteroptimization.repository.QualificationRepository;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -28,7 +31,9 @@ public class StaffMapper {
     private final DepartmentMapper departmentMapper;
     private final SquadMapper squadMapper;
     private final QualificationMapper qualificationMapper;
-    private final DayOffRuleMapper dayOffRuleMapper;
+    @Lazy
+    @Autowired
+    private DayOffRuleMapper dayOffRuleMapper;
     private final ConstraintOverrideMapper constraintOverrideMapper;
 
     /**

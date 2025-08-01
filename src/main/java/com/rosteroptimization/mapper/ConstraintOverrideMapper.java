@@ -7,6 +7,8 @@ import com.rosteroptimization.entity.Constraint;
 import com.rosteroptimization.repository.StaffRepository;
 import com.rosteroptimization.repository.ConstraintRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -18,7 +20,9 @@ public class ConstraintOverrideMapper {
 
     private final StaffRepository staffRepository;
     private final ConstraintRepository constraintRepository;
-    private final StaffMapper staffMapper;
+    @Lazy
+    @Autowired
+    private StaffMapper staffMapper;
     private final ConstraintMapper constraintMapper;
 
     /**

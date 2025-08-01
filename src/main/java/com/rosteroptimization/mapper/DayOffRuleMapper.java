@@ -5,6 +5,8 @@ import com.rosteroptimization.entity.DayOffRule;
 import com.rosteroptimization.entity.Staff;
 import com.rosteroptimization.repository.StaffRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -18,7 +20,9 @@ import java.util.stream.Collectors;
 public class DayOffRuleMapper {
 
     private final StaffRepository staffRepository;
-    private final StaffMapper staffMapper;
+    @Lazy
+    @Autowired
+    private StaffMapper staffMapper;
 
     /**
      * Convert Entity to DTO
