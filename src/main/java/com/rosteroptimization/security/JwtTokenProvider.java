@@ -45,8 +45,10 @@ public class JwtTokenProvider {
                     .setSigningKey(getSigningKey())
                     .build()
                     .parseClaimsJws(token);
+            System.out.println("JWT validation successful");
             return true;
         } catch (JwtException | IllegalArgumentException e) {
+            System.out.println("JWT validation failed: " + e.getMessage());
             return false;
         }
     }
