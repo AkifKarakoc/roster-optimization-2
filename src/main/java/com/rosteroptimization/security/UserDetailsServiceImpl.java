@@ -19,8 +19,14 @@ public class UserDetailsServiceImpl implements UserDetailsService {
 
     @Override
     public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
-        User user = userRepository.findByUsernameAndActiveTrue(username)
+        // findByUsernameAndActiveTrue yerine findByUsername kullan ve sonra active kontrolü yap
+        User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new UsernameNotFoundException("User not found: " + username));
+
+        // Active kontrolü
+        if (!user.getActive()) {
+            throw new UsernameNotFoundException("User is not active: " + username);
+        }
 
         return org.springframework.security.core.userdetails.User.builder()
                 .username(user.getUsername())

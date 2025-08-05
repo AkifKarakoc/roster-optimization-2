@@ -11,6 +11,7 @@ import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -20,23 +21,51 @@ public class AuthService {
     private final AuthenticationManager authenticationManager;
     private final JwtTokenProvider tokenProvider;
     private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
 
     public LoginResponseDTO login(LoginRequestDTO request) {
-        Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword())
-        );
+        System.out.println("=== LOGIN DEBUG ===");
+        System.out.println("Username received: " + request.getUsername());
+        System.out.println("Password received length: " + (request.getPassword() != null ? request.getPassword().length() : "null"));
 
-        String token = tokenProvider.generateToken(authentication);
-        User user = userRepository.findByUsername(request.getUsername())
-                .orElseThrow(() -> new RuntimeException("User not found"));
+        // Check if user exists in database
+        User dbUser = userRepository.findByUsername(request.getUsername()).orElse(null);
+        if (dbUser == null) {
+            System.out.println("ERROR: User not found in database");
+            throw new RuntimeException("User not found");
+        }
 
-        LoginResponseDTO response = new LoginResponseDTO();
-        response.setToken(token);
-        response.setUsername(user.getUsername());
-        response.setRole(user.getRole().name());
-        response.setExpiresIn(3600L);
+        System.out.println("User found in DB: " + dbUser.getUsername());
+        System.out.println("User active: " + dbUser.getActive());
+        System.out.println("User role: " + dbUser.getRole());
+        System.out.println("DB password hash: " + dbUser.getPassword());
 
-        return response;
+        // Test password matching manually
+        boolean passwordMatches = passwordEncoder.matches(request.getPassword(), dbUser.getPassword());
+        System.out.println("Password matches: " + passwordMatches);
+
+        try {
+            Authentication authentication = authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword())
+            );
+            System.out.println("Authentication successful!");
+
+            String token = tokenProvider.generateToken(authentication);
+            System.out.println("Token generated successfully");
+
+            LoginResponseDTO response = new LoginResponseDTO();
+            response.setToken(token);
+            response.setUsername(dbUser.getUsername());
+            response.setRole(dbUser.getRole().name());
+            response.setExpiresIn(3600L);
+
+            return response;
+
+        } catch (Exception e) {
+            System.out.println("Authentication failed: " + e.getMessage());
+            e.printStackTrace();
+            throw e;
+        }
     }
 
     public UserDTO getCurrentUser() {

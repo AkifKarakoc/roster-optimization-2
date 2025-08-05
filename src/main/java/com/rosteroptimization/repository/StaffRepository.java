@@ -39,7 +39,12 @@ public interface StaffRepository extends JpaRepository<Staff, Long> {
     List<Staff> findByDepartmentAndActiveTrue(Department department);
 
     // Find staff by department ID
-    List<Staff> findByDepartmentIdAndActiveTrue(Long departmentId);
+    @Query("SELECT DISTINCT s FROM Staff s " +
+           "LEFT JOIN FETCH s.constraintOverrides " +
+           "LEFT JOIN FETCH s.squad sq " +
+           "LEFT JOIN FETCH sq.squadWorkingPattern " +
+           "WHERE s.department.id = :departmentId AND s.active = true")
+    List<Staff> findByDepartmentIdAndActiveTrue(@Param("departmentId") Long departmentId);
 
     // Find staff by squad
     List<Staff> findBySquadAndActiveTrue(Squad squad);

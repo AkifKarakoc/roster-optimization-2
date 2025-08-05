@@ -123,4 +123,11 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
 
     // Find tasks by IDs (for bulk operations)
     List<Task> findByIdInAndActiveTrue(List<Long> ids);
+
+    @Query("SELECT t FROM Task t WHERE t.department = :department AND t.startTime >= :startTime AND t.endTime <= :endTime AND t.active = true")
+    List<Task> findByDepartmentAndDateRange(@Param("department") Department department,
+                                            @Param("startTime") LocalDateTime startTime,
+                                            @Param("endTime") LocalDateTime endTime);
+
+    List<Task> findByDepartmentIdAndActiveTrueAndStartTimeBetween(Long departmentId, LocalDateTime startTime, LocalDateTime endTime);
 }

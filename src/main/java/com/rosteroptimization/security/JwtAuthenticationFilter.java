@@ -24,6 +24,41 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final UserDetailsService userDetailsService;
 
     @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) throws ServletException {
+        String path = request.getRequestURI();
+        String method = request.getMethod();
+
+        // Only login endpoint should not be filtered, /auth/me needs JWT
+        if (path.equals("/api/auth/login")) {
+            return true;
+        }
+
+        // Swagger endpoints should not be filtered
+        if (path.startsWith("/swagger-ui/") ||
+                path.startsWith("/api-docs/") ||
+                path.startsWith("/v3/api-docs/")) {
+            return true;
+        }
+
+        // OPTIONS requests should not be filtered (CORS preflight)
+        if ("OPTIONS".equals(method)) {
+            return true;
+        }
+
+        // Error endpoint should not be filtered
+        if (path.equals("/error")) {
+            return true;
+        }
+
+        // Actuator endpoints should not be filtered
+        if (path.startsWith("/actuator/")) {
+            return true;
+        }
+
+        return false;
+    }
+
+    @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 

@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.AllArgsConstructor;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 @Entity
 @Table(name = "constraint_overrides",
@@ -11,6 +12,7 @@ import lombok.AllArgsConstructor;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonIgnoreProperties({"hibernateLazyInitializer", "handler", "staff"})
 public class ConstraintOverride {
 
     @Id
@@ -28,4 +30,7 @@ public class ConstraintOverride {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "constraint_id", nullable = false)
     private Constraint constraint;
+
+    @Column(nullable = false)
+    private Boolean active = true;
 }

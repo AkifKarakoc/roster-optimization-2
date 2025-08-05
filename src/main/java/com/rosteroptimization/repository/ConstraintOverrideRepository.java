@@ -20,6 +20,10 @@ public interface ConstraintOverrideRepository extends JpaRepository<ConstraintOv
     // Find by staff ID
     List<ConstraintOverride> findByStaffId(Long staffId);
 
+    // Find by staff IDs and active constraints
+    @Query("SELECT co FROM ConstraintOverride co WHERE co.staff.id IN :staffIds AND co.constraint.active = true AND co.active = true")
+    List<ConstraintOverride> findByStaffIdInAndConstraintActiveTrueAndActiveTrue(@Param("staffIds") List<Long> staffIds);
+
     // Find by constraint
     List<ConstraintOverride> findByConstraint(Constraint constraint);
 
@@ -100,4 +104,6 @@ public interface ConstraintOverrideRepository extends JpaRepository<ConstraintOv
     // Find most overridden constraints
     @Query("SELECT co.constraint FROM ConstraintOverride co WHERE co.constraint.active = true GROUP BY co.constraint ORDER BY COUNT(co) DESC")
     List<Constraint> findMostOverriddenConstraints();
+
+    List<ConstraintOverride> findByStaffAndActiveTrue(Staff staff);
 }

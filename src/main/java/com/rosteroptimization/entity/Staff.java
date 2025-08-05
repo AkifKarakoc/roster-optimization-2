@@ -1,18 +1,23 @@
 package com.rosteroptimization.entity;
 
 import jakarta.persistence.*;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 import lombok.NoArgsConstructor;
 import lombok.AllArgsConstructor;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 import java.util.Set;
 import java.util.List;
+import java.util.Objects;
 
 @Entity
 @Table(name = "staff")
-@Data
+@Getter
+@Setter
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonIgnoreProperties({"hibernateLazyInitializer", "handler", "department", "squad", "qualifications", "dayOffRule"})
 public class Staff {
 
     @Id
@@ -62,4 +67,29 @@ public class Staff {
     // One-to-Many Relationships
     @OneToMany(mappedBy = "staff", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<ConstraintOverride> constraintOverrides;
+
+    // Custom hashCode and equals to avoid Hibernate proxy issues
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        Staff staff = (Staff) o;
+        return Objects.equals(id, staff.id) && 
+               Objects.equals(registrationCode, staff.registrationCode);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(id, registrationCode);
+    }
+
+    @Override
+    public String toString() {
+        return "Staff{" +
+                "id=" + id +
+                ", name='" + name + '\'' +
+                ", surname='" + surname + '\'' +
+                ", registrationCode='" + registrationCode + '\'' +
+                '}';
+    }
 }
