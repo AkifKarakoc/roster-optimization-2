@@ -40,12 +40,7 @@ public class RosterOptimizationApplication implements CommandLineRunner {
 
     @Override
     public void run(String... args) throws Exception {
-        log.info("Initializing application data...");
-
-        initializeBasicData();
-        initializeConstraints();
-
-        log.info("Application data initialization completed!");
+        log.info("Application startup completed - no sample data will be created");
         logApplicationInfo();
     }
 
@@ -222,7 +217,7 @@ public class RosterOptimizationApplication implements CommandLineRunner {
         log.info("   • Username: sa");
         log.info("   • Password: (empty)");
         log.info("");
-        log.info("📈 Initial Data Created:");
+        log.info("📈 Current Data Counts:");
         log.info("   • Departments: {}", departmentRepository.count());
         log.info("   • Qualifications: {}", qualificationRepository.count());
         log.info("   • Working Periods: {}", workingPeriodRepository.count());

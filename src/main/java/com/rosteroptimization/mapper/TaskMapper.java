@@ -7,6 +7,7 @@ import com.rosteroptimization.entity.Qualification;
 import com.rosteroptimization.repository.DepartmentRepository;
 import com.rosteroptimization.repository.QualificationRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -17,6 +18,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class TaskMapper {

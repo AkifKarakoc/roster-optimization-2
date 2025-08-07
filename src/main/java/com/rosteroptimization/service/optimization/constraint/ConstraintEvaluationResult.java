@@ -15,13 +15,20 @@ public class ConstraintEvaluationResult {
 
     private List<ConstraintViolation> hardViolations = new ArrayList<>();
     private List<ConstraintViolation> softViolations = new ArrayList<>();
+    private int hardViolationCount = 0;
+    private int softViolationCount = 0;
+    private List<String> violations = new ArrayList<>();
+    private List<String> violationDetails = new ArrayList<>();
 
     /**
      * Add a hard constraint violation
      */
-    public void addHardViolation(String description) {
-        hardViolations.add(new ConstraintViolation(ConstraintViolation.Type.HARD, description));
+    public void addHardViolation(String violation) {
+        hardViolationCount++;
+        violations.add("HARD: " + violation);
+        violationDetails.add(violation);
     }
+
 
     /**
      * Add a hard constraint violation with penalty
@@ -33,8 +40,10 @@ public class ConstraintEvaluationResult {
     /**
      * Add a soft constraint violation
      */
-    public void addSoftViolation(String description) {
-        softViolations.add(new ConstraintViolation(ConstraintViolation.Type.SOFT, description));
+    public void addSoftViolation(String violation) {
+        softViolationCount++;
+        violations.add("SOFT: " + violation);
+        violationDetails.add(violation);
     }
 
     /**
@@ -42,6 +51,10 @@ public class ConstraintEvaluationResult {
      */
     public void addSoftViolation(String description, double penalty) {
         softViolations.add(new ConstraintViolation(ConstraintViolation.Type.SOFT, description, penalty));
+    }
+
+    public List<String> getViolationDetails() {
+        return new ArrayList<>(violationDetails);
     }
 
     /**
@@ -119,8 +132,10 @@ public class ConstraintEvaluationResult {
      * Clear all violations
      */
     public void clear() {
-        hardViolations.clear();
-        softViolations.clear();
+        hardViolationCount = 0;
+        softViolationCount = 0;
+        violations.clear();
+        violationDetails.clear();
     }
 
     @Override
@@ -159,4 +174,6 @@ public class ConstraintEvaluationResult {
             return String.format("%s: %s (penalty: %.1f)", type, description, penalty);
         }
     }
+
+
 }

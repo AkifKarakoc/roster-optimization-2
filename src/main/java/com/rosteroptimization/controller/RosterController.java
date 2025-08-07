@@ -3,6 +3,7 @@ package com.rosteroptimization.controller;
 import com.rosteroptimization.dto.RosterPlanDTO;
 import com.rosteroptimization.mapper.RosterPlanMapper;
 import com.rosteroptimization.service.RosterService;
+import com.rosteroptimization.service.export.RosterExportService;
 import com.rosteroptimization.service.optimization.algorithm.OptimizationException;
 import com.rosteroptimization.service.optimization.model.RosterPlan;
 import lombok.RequiredArgsConstructor;
@@ -10,9 +11,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.RequestMethod;
 
 import jakarta.validation.Valid;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
@@ -29,6 +34,7 @@ public class RosterController {
 
     private final RosterService rosterService;
     private final RosterPlanMapper rosterPlanMapper;
+    private final RosterExportService rosterExportService;
 
     /**
      * Generate a new roster plan using optimization algorithms
@@ -239,6 +245,107 @@ public class RosterController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(new ApiResponse<>(false, "Test failed: " + e.getMessage(), null));
         }
+    }
+
+    /**
+     * Export roster plan as Excel file (Test endpoint)
+     */
+    @GetMapping("/export/excel/test")
+    public ResponseEntity<byte[]> exportRosterToExcelTest() {
+        try {
+            log.info("Testing Excel export with dummy data");
+            
+            // Create dummy data for testing
+            RosterPlan dummyPlan = createDummyRosterPlan();
+            
+            byte[] excelData = rosterExportService.exportToExcel(dummyPlan);
+            
+            String fileName = "roster_plan_test_" + LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd")) + ".xlsx";
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+            headers.setContentDispositionFormData("attachment", fileName);
+            headers.setContentLength(excelData.length);
+            
+            log.info("Excel export test completed successfully. File size: {} bytes", excelData.length);
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(excelData);
+                    
+        } catch (Exception e) {
+            log.error("Error testing Excel export: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Export roster plan as Excel file
+     */
+    @PostMapping(value = "/export/excel", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<byte[]> exportRosterToExcel(@RequestBody(required = false) RosterPlan rosterPlan) {
+        try {
+            log.info("Exporting roster plan to Excel format");
+            
+            // If no plan provided, create dummy data
+            if (rosterPlan == null) {
+                rosterPlan = createDummyRosterPlan();
+            }
+            
+            byte[] excelData = rosterExportService.exportToExcel(rosterPlan);
+            
+            String fileName = "roster_plan_" + LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd")) + ".xlsx";
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+            headers.setContentDispositionFormData("attachment", fileName);
+            headers.setContentLength(excelData.length);
+            
+            log.info("Excel export completed successfully. File size: {} bytes", excelData.length);
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(excelData);
+                    
+        } catch (Exception e) {
+            log.error("Error exporting roster to Excel: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Export roster plan as PDF file
+     */
+    @PostMapping("/export/pdf")
+    public ResponseEntity<byte[]> exportRosterToPdf(@RequestBody(required = false) RosterPlan rosterPlan) {
+        try {
+            log.info("Exporting roster plan to PDF format");
+            
+            byte[] pdfData = rosterExportService.exportToPdf(rosterPlan);
+            
+            String fileName = "roster_plan_" + LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd")) + ".pdf";
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_PDF);
+            headers.setContentDispositionFormData("attachment", fileName);
+            headers.setContentLength(pdfData.length);
+            
+            log.info("PDF export completed successfully. File size: {} bytes", pdfData.length);
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(pdfData);
+                    
+        } catch (Exception e) {
+            log.error("Error exporting roster to PDF: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Create dummy roster plan for testing
+     */
+    private RosterPlan createDummyRosterPlan() {
+        // Bu metod test için dummy data oluşturur
+        // Gerçek implementasyon için RosterPlan ve ilişkili entity'lerin constructor'larına bağlı
+        return new RosterPlan(); // Basit test için boş plan döndür
     }
 
     /**

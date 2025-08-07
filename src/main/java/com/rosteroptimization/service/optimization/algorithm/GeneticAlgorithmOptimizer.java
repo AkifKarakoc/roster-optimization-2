@@ -13,10 +13,11 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 /**
- * Genetic Algorithm implementation for roster optimization
+ * Refactored Genetic Algorithm with improved maintainability and performance
  */
 @Component
 @RequiredArgsConstructor
@@ -25,313 +26,263 @@ public class GeneticAlgorithmOptimizer implements Optimizer {
 
     private final ConstraintEvaluator constraintEvaluator;
 
-    // GA Parameters (configurable via request parameters)
-    private static final int DEFAULT_POPULATION_SIZE = 50;
-    private static final int DEFAULT_MAX_GENERATIONS = 1000;
-    private static final double DEFAULT_MUTATION_RATE = 0.1;
-    private static final double DEFAULT_CROSSOVER_RATE = 0.8;
-    private static final double DEFAULT_ELITE_RATE = 0.1;
-    private static final int DEFAULT_TOURNAMENT_SIZE = 5;
-    private static final int DEFAULT_STAGNATION_LIMIT = 100;
+    // Algorithm configuration
+    @Data
+    @Builder(toBuilder = true)
+    public static class GAConfiguration {
+        private final int populationSize;
+        private final int maxGenerations;
+        private final double mutationRate;
+        private final double crossoverRate;
+        private final double eliteRate;
+        private final int tournamentSize;
+        private final int stagnationLimit;
+        private final boolean enableLocalSearch;
+        private final int localSearchIterations;
+
+        public static GAConfiguration getDefault() {
+            return GAConfiguration.builder()
+                    .populationSize(50)
+                    .maxGenerations(5000)
+                    .mutationRate(0.1)
+                    .crossoverRate(0.8)
+                    .eliteRate(0.1)
+                    .tournamentSize(5)
+                    .stagnationLimit(100)
+                    .enableLocalSearch(true)
+                    .localSearchIterations(20)
+                    .build();
+        }
+    }
+
+    // Performance components
+    private final FitnessCache fitnessCache = new FitnessCache(5000);
+    private final ExecutorService evaluationExecutor = createOptimizedExecutor();
 
     // Algorithm state
     private volatile boolean cancelled = false;
     private volatile int currentGeneration = 0;
-    private volatile double bestFitness = Double.MIN_VALUE;
+    private volatile GAConfiguration config;
+
+    // === MAIN OPTIMIZATION METHOD ===
 
     @Override
     public RosterPlan optimize(OptimizationRequest request) throws OptimizationException {
-        log.info("Starting Genetic Algorithm optimization for {} staff members, {} tasks",
+        log.info("Starting GA optimization for {} staff, {} tasks",
                 request.getActiveStaff().size(), request.getActiveTasks().size());
 
-        // Validate request
-        validateRequest(request);
-
-        // Reset algorithm state
-        reset();
-
-        // Extract GA parameters
-        GAParameters params = extractGAParameters(request);
-        log.info("GA Parameters: {}", params);
-
-        // Generate all possible genes for the problem
-        List<Gene> possibleGenes = generatePossibleGenes(request);
-        log.info("Generated {} possible genes", possibleGenes.size());
-
-        // Initialize population
-        List<Chromosome> population = initializePopulation(params.getPopulationSize(), possibleGenes, request);
-        log.info("Initialized population with {} chromosomes", population.size());
-
-        // Evolution loop
         long startTime = System.currentTimeMillis();
-        List<Double> fitnessHistory = new ArrayList<>();
+
+        try {
+            validateRequest(request);
+            initializeOptimization(request);
+
+            // Generate possible genes
+            Map<String, List<Gene>> groupedGenes = generatePossibleGenes(request);
+
+            // Run two-phase optimization
+            Chromosome bestSolution = runTwoPhaseOptimization(groupedGenes, request);
+
+            // Build result
+            long executionTime = System.currentTimeMillis() - startTime;
+            return buildRosterPlan(bestSolution, request, executionTime);
+
+        } finally {
+            cleanup();
+        }
+    }
+
+    // === TWO-PHASE OPTIMIZATION ===
+
+    private Chromosome runTwoPhaseOptimization(Map<String, List<Gene>> groupedGenes,
+                                               OptimizationRequest request) {
+
+        // Phase 1: Constraint Satisfaction
+        log.info("Phase 1: Constraint satisfaction focus");
+        GAConfiguration phase1Config = config.toBuilder()
+                .populationSize(config.populationSize * 2)
+                .maxGenerations(config.maxGenerations / 3)
+                .mutationRate(0.3)
+                .eliteRate(0.05)
+                .build();
+
+        List<Chromosome> population = runConstraintPhase(groupedGenes, request, phase1Config);
+
+        // Phase 2: Quality Optimization
+        log.info("Phase 2: Quality optimization focus");
+        GAConfiguration phase2Config = config.toBuilder()
+                .populationSize(config.populationSize)
+                .maxGenerations(config.maxGenerations * 2 / 3)
+                .mutationRate(0.05)
+                .eliteRate(0.2)
+                .build();
+
+        return runQualityPhase(population, groupedGenes, request, phase2Config);
+    }
+
+    private List<Chromosome> runConstraintPhase(Map<String, List<Gene>> groupedGenes,
+                                                OptimizationRequest request,
+                                                GAConfiguration phaseConfig) {
+
+        // Initialize population with constraint-aware chromosomes
+        List<Chromosome> population = initializePopulation(groupedGenes, request, phaseConfig);
+
         int stagnationCounter = 0;
+        double previousBest = Double.MIN_VALUE;
 
-        for (currentGeneration = 0; currentGeneration < params.getMaxGenerations() && !cancelled; currentGeneration++) {
+        for (int gen = 0; gen < phaseConfig.maxGenerations && !cancelled; gen++) {
+            currentGeneration = gen;
 
-            // Evaluate fitness for all chromosomes
-            evaluatePopulation(population, request);
+            // Evaluate population with constraint focus
+            evaluatePopulationConstraintFocused(population, request);
+            population.sort((a, b) -> Double.compare(b.getFitnessScore(), a.getFitnessScore()));
 
-            // Sort by fitness (descending - higher is better)
-            population.sort((c1, c2) -> Double.compare(c2.getFitnessScore(), c1.getFitnessScore()));
+            double currentBest = population.get(0).getFitnessScore();
 
-            // Track best fitness
-            double currentBestFitness = population.get(0).getFitnessScore();
-            fitnessHistory.add(currentBestFitness);
-
-            // Check for improvement
-            if (currentBestFitness > bestFitness) {
-                bestFitness = currentBestFitness;
-                stagnationCounter = 0;
-                log.debug("Generation {}: New best fitness = {:.2f}", currentGeneration, bestFitness);
-            } else {
-                stagnationCounter++;
-            }
-
-            // Early termination if stagnated
-            if (stagnationCounter >= params.getStagnationLimit()) {
-                log.info("Early termination due to stagnation after {} generations", currentGeneration);
+            // Check for early termination (feasible solution found)
+            if (isFeasible(population.get(0), request)) {
+                log.info("Phase 1 completed early at generation {} - feasible solution found!", gen);
                 break;
             }
 
-            // Log progress periodically
-            if (currentGeneration % 50 == 0) {
-                log.info("Generation {}: Best fitness = {:.2f}, Average fitness = {:.2f}",
-                        currentGeneration, currentBestFitness, getAverageFitness(population));
+            // Stagnation check
+            if (Math.abs(currentBest - previousBest) < 1.0) {
+                stagnationCounter++;
+            } else {
+                stagnationCounter = 0;
+                previousBest = currentBest;
+            }
+
+            if (stagnationCounter >= 50) {
+                log.info("Phase 1 stagnation limit reached at generation {}", gen);
+                break;
+            }
+
+            // Log progress
+            if (gen % 20 == 0) {
+                int hardViolations = getHardViolationCount(population.get(0), request);
+                log.info("Phase 1 Gen {}: Hard violations = {}, Best fitness = {:.2f}",
+                        gen, hardViolations, currentBest);
             }
 
             // Create next generation
-            population = createNextGeneration(population, params, possibleGenes, request);
-        }
-
-        long executionTime = System.currentTimeMillis() - startTime;
-
-        // Get best solution
-        Chromosome bestChromosome = population.get(0);
-
-        // Convert to roster plan
-        RosterPlan rosterPlan = convertToRosterPlan(bestChromosome, request, executionTime);
-
-        // Add algorithm metadata
-        rosterPlan.addAlgorithmMetadata("generations", currentGeneration);
-        rosterPlan.addAlgorithmMetadata("finalPopulationSize", population.size());
-        rosterPlan.addAlgorithmMetadata("stagnationCounter", stagnationCounter);
-        rosterPlan.addAlgorithmMetadata("fitnessHistory", fitnessHistory);
-        rosterPlan.addAlgorithmMetadata("parameters", params.toMap());
-
-        log.info("GA optimization completed in {} ms, {} generations, final fitness: {:.2f}",
-                executionTime, currentGeneration, bestChromosome.getFitnessScore());
-
-        return rosterPlan;
-    }
-
-    /**
-     * Generate all possible genes for the optimization problem
-     */
-    private List<Gene> generatePossibleGenes(OptimizationRequest request) {
-        List<Gene> possibleGenes = new ArrayList<>();
-        List<Staff> activeStaff = request.getActiveStaff();
-        List<Shift> activeShifts = request.getActiveShifts();
-        List<Task> activeTasks = request.getActiveTasks();
-
-        // Generate genes for each staff member for each day in the planning period
-        LocalDate currentDate = request.getStartDate();
-        while (!currentDate.isAfter(request.getEndDate())) {
-
-            for (Staff staff : activeStaff) {
-
-                // Day off gene
-                possibleGenes.add(Gene.createDayOffGene(staff, currentDate));
-
-                // Shift-only genes (for each compatible shift)
-                for (Shift shift : activeShifts) {
-                    possibleGenes.add(Gene.createShiftOnlyGene(staff, currentDate, shift));
-                }
-
-                // Shift + Task genes (for each compatible combination)
-                for (Task task : activeTasks) {
-                    // Check if task is scheduled for this date
-                    if (isTaskScheduledForDate(task, currentDate)) {
-                        // Check if staff is qualified for this task
-                        if (isStaffQualifiedForTask(staff, task)) {
-                            // Check department compatibility
-                            if (staff.getDepartment().getId().equals(task.getDepartment().getId())) {
-                                // Find compatible shifts for this task
-                                for (Shift shift : getCompatibleShiftsForTask(activeShifts, task, currentDate)) {
-                                    possibleGenes.add(Gene.createShiftWithTaskGene(staff, currentDate, shift, task));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            currentDate = currentDate.plusDays(1);
-        }
-
-        return possibleGenes;
-    }
-
-    /**
-     * Initialize population with random chromosomes
-     */
-    private List<Chromosome> initializePopulation(int populationSize, List<Gene> possibleGenes,
-                                                  OptimizationRequest request) {
-        List<Chromosome> population = new ArrayList<>();
-        Random random = new Random(System.currentTimeMillis());
-
-        for (int i = 0; i < populationSize; i++) {
-            Chromosome chromosome = createRandomChromosome(possibleGenes, request, random);
-            population.add(chromosome);
+            population = createNextGeneration(population, groupedGenes, phaseConfig, true);
         }
 
         return population;
     }
 
-    /**
-     * Create a random valid chromosome
-     */
-    private Chromosome createRandomChromosome(List<Gene> possibleGenes, OptimizationRequest request, Random random) {
-        Map<String, Gene> selectedGenes = new HashMap<>(); // staffId-date -> Gene
+    private Chromosome runQualityPhase(List<Chromosome> initialPopulation,
+                                       Map<String, List<Gene>> groupedGenes,
+                                       OptimizationRequest request,
+                                       GAConfiguration phaseConfig) {
 
-        // Group possible genes by staff and date
-        Map<String, List<Gene>> genesByStaffAndDate = possibleGenes.stream()
-                .collect(Collectors.groupingBy(gene -> gene.getStaff().getId() + "-" + gene.getDate()));
+        // Trim population to target size
+        List<Chromosome> population = initialPopulation.stream()
+                .limit(phaseConfig.populationSize)
+                .collect(Collectors.toList());
 
-        // For each staff-date combination, randomly select one gene
-        for (Map.Entry<String, List<Gene>> entry : genesByStaffAndDate.entrySet()) {
-            List<Gene> candidateGenes = entry.getValue();
+        int stagnationCounter = 0;
+        double previousBest = population.get(0).getFitnessScore();
 
-            // Weighted random selection (prefer day-off and shift-only over complex assignments)
-            Gene selectedGene = selectRandomGeneWithBias(candidateGenes, random);
-            selectedGenes.put(entry.getKey(), selectedGene);
-        }
+        for (int gen = 0; gen < phaseConfig.maxGenerations && !cancelled; gen++) {
+            currentGeneration = gen;
 
-        return new Chromosome(new ArrayList<>(selectedGenes.values()));
-    }
+            // Evaluate with quality focus
+            evaluatePopulationQualityFocused(population, request);
+            population.sort((a, b) -> Double.compare(b.getFitnessScore(), a.getFitnessScore()));
 
-    /**
-     * Select random gene with bias towards simpler assignments
-     */
-    private Gene selectRandomGeneWithBias(List<Gene> candidateGenes, Random random) {
-        // Create weighted list (day-off and shift-only have higher probability)
-        List<Gene> weightedGenes = new ArrayList<>();
+            double currentBest = population.get(0).getFitnessScore();
 
-        for (Gene gene : candidateGenes) {
-            if (gene.isDayOff()) {
-                // Add day-off genes 3 times (higher probability)
-                Collections.addAll(weightedGenes, gene, gene, gene);
-            } else if (!gene.hasTask()) {
-                // Add shift-only genes 2 times
-                Collections.addAll(weightedGenes, gene, gene);
+            // Stagnation check
+            if (Math.abs(currentBest - previousBest) < 0.1) {
+                stagnationCounter++;
             } else {
-                // Add task genes once
-                weightedGenes.add(gene);
+                stagnationCounter = 0;
+                previousBest = currentBest;
             }
+
+            if (stagnationCounter >= phaseConfig.stagnationLimit) {
+                log.info("Phase 2 early termination due to stagnation at generation {}", gen);
+                break;
+            }
+
+            // Log progress
+            if (gen % 30 == 0) {
+                log.info("Phase 2 Gen {}: Best fitness = {:.2f}", gen, currentBest);
+            }
+
+            // Local search on elite
+            if (phaseConfig.enableLocalSearch && gen % 10 == 0) {
+                applyLocalSearch(population, groupedGenes, request, phaseConfig);
+            }
+
+            // Create next generation
+            population = createNextGeneration(population, groupedGenes, phaseConfig, false);
         }
 
-        return weightedGenes.get(random.nextInt(weightedGenes.size()));
+        return population.get(0);
     }
 
-    /**
-     * Evaluate fitness for all chromosomes in population
-     */
-    private void evaluatePopulation(List<Chromosome> population, OptimizationRequest request) {
-        population.parallelStream().forEach(chromosome -> {
-            if (!chromosome.isFitnessCalculated()) {
-                double fitness = calculateFitness(chromosome, request);
-                chromosome.setFitnessScore(fitness);
-            }
-        });
+    // === POPULATION MANAGEMENT ===
+
+    private List<Chromosome> initializePopulation(Map<String, List<Gene>> groupedGenes,
+                                                  OptimizationRequest request,
+                                                  GAConfiguration config) {
+
+        List<Chromosome> population = new ArrayList<>();
+        int targetSize = config.populationSize;
+
+        // 40% constraint-aware chromosomes
+        int constraintAware = targetSize * 2 / 5;
+        for (int i = 0; i < constraintAware; i++) {
+            population.add(Chromosome.createConstraintAware(groupedGenes, request));
+        }
+
+        // 60% random chromosomes for diversity
+        while (population.size() < targetSize) {
+            population.add(Chromosome.createRandom(groupedGenes, request));
+        }
+
+        log.info("Initialized population of {} chromosomes", population.size());
+        return population;
     }
 
-    /**
-     * Calculate fitness score for a chromosome
-     */
-    private double calculateFitness(Chromosome chromosome, OptimizationRequest request) {
-        // Convert chromosome to roster plan for evaluation
-        RosterPlan tempPlan = RosterPlan.builder()
-                .assignments(chromosome.toAssignments())
-                .unassignedTasks(chromosome.getUnassignedTasks(request.getActiveTasks()))
-                .build();
+    private List<Chromosome> createNextGeneration(List<Chromosome> currentPopulation,
+                                                  Map<String, List<Gene>> groupedGenes,
+                                                  GAConfiguration config,
+                                                  boolean constraintPhase) {
 
-        // Evaluate constraints
-        ConstraintEvaluationResult evaluation = constraintEvaluator.evaluateRosterPlan(tempPlan);
-
-        // Calculate fitness score
-        // Higher score is better
-        // Start with base score and subtract penalties
-        double fitness = 10000.0; // Base score
-
-        // Heavy penalty for hard constraint violations
-        fitness -= evaluation.getHardViolationCount() * 1000.0;
-
-        // Light penalty for soft constraint violations
-        fitness -= evaluation.getSoftViolationCount() * 10.0;
-
-        // Bonus for task coverage
-        double taskCoverageRate = tempPlan.getTaskCoverageRate();
-        fitness += taskCoverageRate * 50.0; // Max 5000 bonus for 100% coverage
-
-        // Bonus for staff utilization
-        double staffUtilizationRate = tempPlan.getStaffUtilizationRate();
-        fitness += staffUtilizationRate * 20.0; // Max 2000 bonus for 100% utilization
-
-        // Small penalty for excessive working hours (encourage balance)
-        double totalHours = chromosome.getTotalWorkingHours();
-        double expectedHours = request.getActiveStaff().size() * request.getPlanningDays() * 8.0; // 8h per day expected
-        double hoursDeviation = Math.abs(totalHours - expectedHours);
-        fitness -= hoursDeviation * 0.1;
-
-        return fitness;
-    }
-
-    /**
-     * Create next generation using selection, crossover, and mutation
-     */
-    private List<Chromosome> createNextGeneration(List<Chromosome> currentPopulation, GAParameters params,
-                                                  List<Gene> possibleGenes, OptimizationRequest request) {
         List<Chromosome> nextGeneration = new ArrayList<>();
-        Random random = new Random();
 
-        // Elite selection - keep best chromosomes
-        int eliteCount = (int) (currentPopulation.size() * params.getEliteRate());
+        // Elitism
+        int eliteCount = Math.max(1, (int)(config.populationSize * config.eliteRate));
         for (int i = 0; i < eliteCount; i++) {
             nextGeneration.add(currentPopulation.get(i).copy());
         }
 
-        // Fill rest with crossover and mutation
-        while (nextGeneration.size() < params.getPopulationSize()) {
+        // Generate offspring
+        while (nextGeneration.size() < config.populationSize) {
+            if (cancelled) break;
 
-            if (random.nextDouble() < params.getCrossoverRate() && nextGeneration.size() < params.getPopulationSize() - 1) {
-                // Crossover
-                Chromosome parent1 = tournamentSelection(currentPopulation, params.getTournamentSize(), random);
-                Chromosome parent2 = tournamentSelection(currentPopulation, params.getTournamentSize(), random);
+            // Selection and crossover
+            if (ThreadLocalRandom.current().nextDouble() < config.crossoverRate &&
+                    nextGeneration.size() < config.populationSize - 1) {
 
-                Chromosome offspring1 = parent1.crossover(parent2, random);
-                Chromosome offspring2 = parent2.crossover(parent1, random);
+                Chromosome parent1 = tournamentSelection(currentPopulation, config.tournamentSize);
+                Chromosome parent2 = tournamentSelection(currentPopulation, config.tournamentSize);
 
-                // Mutate offspring
-                if (random.nextDouble() < params.getMutationRate()) {
-                    offspring1.mutateRandomGene(random, possibleGenes);
-                }
-                if (random.nextDouble() < params.getMutationRate()) {
-                    offspring2.mutateRandomGene(random, possibleGenes);
-                }
+                Chromosome offspring = parent1.crossover(parent2);
+                applyMutation(offspring, groupedGenes, config, constraintPhase);
+                offspring.repairBasic();
 
-                nextGeneration.add(offspring1);
-                if (nextGeneration.size() < params.getPopulationSize()) {
-                    nextGeneration.add(offspring2);
-                }
-
+                nextGeneration.add(offspring);
             } else {
-                // Direct selection with mutation
-                Chromosome selected = tournamentSelection(currentPopulation, params.getTournamentSize(), random);
+                // Mutation only
+                Chromosome selected = tournamentSelection(currentPopulation, config.tournamentSize);
                 Chromosome mutated = selected.copy();
-
-                if (random.nextDouble() < params.getMutationRate()) {
-                    mutated.mutateRandomGene(random, possibleGenes);
-                }
+                applyMutation(mutated, groupedGenes, config, constraintPhase);
+                mutated.repairBasic();
 
                 nextGeneration.add(mutated);
             }
@@ -340,10 +291,202 @@ public class GeneticAlgorithmOptimizer implements Optimizer {
         return nextGeneration;
     }
 
-    /**
-     * Tournament selection
-     */
-    private Chromosome tournamentSelection(List<Chromosome> population, int tournamentSize, Random random) {
+    // === EVALUATION METHODS ===
+
+    private void evaluatePopulationConstraintFocused(List<Chromosome> population,
+                                                     OptimizationRequest request) {
+        population.parallelStream()
+                .filter(c -> !c.isFitnessCalculated())
+                .forEach(c -> {
+                    Double cached = fitnessCache.get(c.getSignature());
+                    if (cached != null) {
+                        c.setFitnessScore(cached);
+                    } else {
+                        double fitness = calculateConstraintFitness(c, request);
+                        c.setFitnessScore(fitness);
+                        fitnessCache.put(c.getSignature(), fitness);
+                    }
+                });
+    }
+
+    private void evaluatePopulationQualityFocused(List<Chromosome> population,
+                                                  OptimizationRequest request) {
+        population.parallelStream()
+                .filter(c -> !c.isFitnessCalculated())
+                .forEach(c -> {
+                    Double cached = fitnessCache.get(c.getSignature());
+                    if (cached != null) {
+                        c.setFitnessScore(cached);
+                    } else {
+                        double fitness = calculateQualityFitness(c, request);
+                        c.setFitnessScore(fitness);
+                        fitnessCache.put(c.getSignature(), fitness);
+                    }
+                });
+    }
+
+    private double calculateConstraintFitness(Chromosome chromosome, OptimizationRequest request) {
+        RosterPlan tempPlan = createTempPlan(chromosome, request);
+        ConstraintEvaluationResult eval = constraintEvaluator.evaluateRosterPlan(tempPlan, true); // Early termination
+
+        double fitness = 50000.0;
+
+        // Heavy penalty for hard violations
+        fitness -= eval.getHardViolationCount() * 1000;
+
+        // Light penalty for soft violations
+        fitness -= eval.getSoftViolationCount() * 10;
+
+        // Bonus for task coverage
+        double coverageRate = tempPlan.getTaskCoverageRate() / 100.0;
+        fitness += coverageRate * 500;
+
+        // Small bonus for staff utilization
+        double utilizationRate = tempPlan.getStaffUtilizationRate() / 100.0;
+        fitness += utilizationRate * 100;
+
+        return fitness;
+    }
+
+    private double calculateQualityFitness(Chromosome chromosome, OptimizationRequest request) {
+        RosterPlan tempPlan = createTempPlan(chromosome, request);
+        ConstraintEvaluationResult eval = constraintEvaluator.evaluateRosterPlan(tempPlan);
+
+        double fitness = 10000.0;
+
+        // Hard violations are very costly
+        int hardViolations = eval.getHardViolationCount();
+        if (hardViolations > 0) {
+            fitness -= hardViolations * 5000; // Heavy penalty
+        }
+
+        // Soft violations moderately costly
+        fitness -= eval.getSoftViolationCount() * 50;
+
+        if (hardViolations == 0) {
+            // Quality bonuses only if feasible
+            double coverageRate = tempPlan.getTaskCoverageRate() / 100.0;
+            fitness += Math.pow(coverageRate, 2) * 2000; // Quadratic reward
+
+            double utilizationRate = tempPlan.getStaffUtilizationRate() / 100.0;
+            fitness += utilizationRate * 1000;
+
+            // Fairness bonus
+            double fairness = calculateFairness(chromosome, request);
+            fitness += fairness * 800;
+
+            // Pattern compliance bonus
+            double patternCompliance = calculatePatternCompliance(chromosome, request);
+            fitness += patternCompliance * 600;
+        }
+
+        return fitness;
+    }
+
+    // === GENETIC OPERATORS ===
+
+    private void applyMutation(Chromosome chromosome, Map<String, List<Gene>> groupedGenes,
+                               GAConfiguration config, boolean constraintPhase) {
+
+        double mutationRate = constraintPhase ?
+                config.mutationRate * 2 : // Higher mutation in constraint phase
+                config.mutationRate;
+
+        chromosome.mutate(groupedGenes, mutationRate);
+    }
+
+    private void applyLocalSearch(List<Chromosome> population, Map<String, List<Gene>> groupedGenes,
+                                  OptimizationRequest request, GAConfiguration config) {
+
+        int eliteCount = Math.max(1, (int)(population.size() * 0.1));
+
+        for (int i = 0; i < eliteCount; i++) {
+            Chromosome elite = population.get(i);
+            localSearchImprovement(elite, groupedGenes, request, config.localSearchIterations);
+        }
+    }
+
+    private void localSearchImprovement(Chromosome chromosome, Map<String, List<Gene>> groupedGenes,
+                                        OptimizationRequest request, int maxIterations) {
+
+        double currentFitness = chromosome.getFitnessScore();
+
+        for (int iter = 0; iter < maxIterations; iter++) {
+            if (cancelled) break;
+
+            Chromosome neighbor = chromosome.copy();
+
+            // Try to improve unassigned tasks
+            List<Task> unassigned = neighbor.getUnassignedTasks(request.getActiveTasks());
+            if (!unassigned.isEmpty()) {
+                if (tryAssignHighPriorityTask(neighbor, unassigned.get(0), groupedGenes, request)) {
+                    double neighborFitness = calculateQualityFitness(neighbor, request);
+                    if (neighborFitness > currentFitness) {
+                        chromosome.setGenes(neighbor.getGenes());
+                        chromosome.setFitnessScore(neighborFitness);
+                        currentFitness = neighborFitness;
+                        continue;
+                    }
+                }
+            }
+
+            // Try random improvement
+            neighbor.mutate(groupedGenes, 0.1); // Light mutation
+            neighbor.repairBasic();
+
+            double neighborFitness = calculateQualityFitness(neighbor, request);
+            if (neighborFitness > currentFitness) {
+                chromosome.setGenes(neighbor.getGenes());
+                chromosome.setFitnessScore(neighborFitness);
+                currentFitness = neighborFitness;
+            }
+        }
+    }
+
+    private boolean tryAssignHighPriorityTask(Chromosome chromosome, Task task,
+                                              Map<String, List<Gene>> groupedGenes,
+                                              OptimizationRequest request) {
+
+        LocalDate taskDate = task.getStartTime().toLocalDate();
+
+        // Find qualified staff
+        List<Staff> qualifiedStaff = request.getActiveStaff().stream()
+                .filter(s -> s.getDepartment().getId().equals(task.getDepartment().getId()))
+                .filter(s -> task.getRequiredQualifications().stream()
+                        .allMatch(req -> s.getQualifications().contains(req)))
+                .collect(Collectors.toList());
+
+        Collections.shuffle(qualifiedStaff, ThreadLocalRandom.current());
+
+        for (Staff staff : qualifiedStaff) {
+            String key = staff.getId() + "-" + taskDate;
+            List<Gene> alternatives = groupedGenes.get(key);
+
+            if (alternatives != null) {
+                Optional<Gene> taskGene = alternatives.stream()
+                        .filter(g -> g.hasTask() && g.getTask().equals(task))
+                        .findFirst();
+
+                if (taskGene.isPresent()) {
+                    // Try to replace current gene for this staff-date
+                    Optional<Gene> currentGene = chromosome.getGenes().stream()
+                            .filter(g -> g.getGeneId().equals(key))
+                            .findFirst();
+
+                    if (currentGene.isPresent() && !currentGene.get().hasTask()) {
+                        int index = chromosome.getGenes().indexOf(currentGene.get());
+                        chromosome.getGenes().set(index, taskGene.get().copy());
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private Chromosome tournamentSelection(List<Chromosome> population, int tournamentSize) {
+        ThreadLocalRandom random = ThreadLocalRandom.current();
         Chromosome best = null;
 
         for (int i = 0; i < tournamentSize; i++) {
@@ -356,20 +499,70 @@ public class GeneticAlgorithmOptimizer implements Optimizer {
         return best;
     }
 
-    /**
-     * Convert best chromosome to roster plan
-     */
-    private RosterPlan convertToRosterPlan(Chromosome bestChromosome, OptimizationRequest request, long executionTime) {
+    // === UTILITY METHODS ===
+
+    private Map<String, List<Gene>> generatePossibleGenes(OptimizationRequest request) {
+        log.info("Generating possible genes for optimization");
+
+        List<Gene> allGenes = new ArrayList<>();
+
+        for (LocalDate date = request.getStartDate();
+             !date.isAfter(request.getEndDate());
+             date = date.plusDays(1)) {
+
+            for (Staff staff : request.getActiveStaff()) {
+                // Day off option
+                allGenes.add(Gene.createDayOffGene(staff, date));
+
+                // Shift-only options
+                for (Shift shift : request.getActiveShifts()) {
+                    allGenes.add(Gene.createShiftOnlyGene(staff, date, shift));
+                }
+
+                // Shift+task options
+                for (Task task : getTasksForDate(request.getActiveTasks(), date)) {
+                    if (isStaffQualifiedForTask(staff, task) &&
+                            staff.getDepartment().getId().equals(task.getDepartment().getId())) {
+
+                        for (Shift shift : getCompatibleShifts(request.getActiveShifts(), task)) {
+                            allGenes.add(Gene.createShiftWithTaskGene(staff, date, shift, task));
+                        }
+                    }
+                }
+            }
+        }
+
+        Map<String, List<Gene>> grouped = allGenes.stream()
+                .collect(Collectors.groupingBy(Gene::getGeneId));
+
+        log.info("Generated {} unique gene combinations for {} staff-date pairs",
+                allGenes.size(), grouped.size());
+
+        return grouped;
+    }
+
+    private RosterPlan createTempPlan(Chromosome chromosome, OptimizationRequest request) {
+        return RosterPlan.builder()
+                .planId("TEMP-" + UUID.randomUUID())
+                .algorithmUsed("GA-TEMP")
+                .startDate(request.getStartDate())
+                .endDate(request.getEndDate())
+                .assignments(chromosome.toAssignments())
+                .unassignedTasks(chromosome.getUnassignedTasks(request.getActiveTasks()))
+                .build();
+    }
+
+    private RosterPlan buildRosterPlan(Chromosome bestChromosome, OptimizationRequest request,
+                                       long executionTime) {
+
         List<Assignment> assignments = bestChromosome.toAssignments();
         List<Task> unassignedTasks = bestChromosome.getUnassignedTasks(request.getActiveTasks());
 
-        // Find underutilized staff
         List<Staff> underutilizedStaff = request.getActiveStaff().stream()
-                .filter(staff -> bestChromosome.getWorkingDaysCount(staff) == 0)
-                .toList();
+                .filter(s -> bestChromosome.getWorkingDaysCount(s) == 0)
+                .collect(Collectors.toList());
 
-        // Evaluate final constraints
-        RosterPlan rosterPlan = RosterPlan.builder()
+        RosterPlan plan = RosterPlan.builder()
                 .planId(UUID.randomUUID().toString())
                 .generatedAt(LocalDateTime.now())
                 .algorithmUsed(getAlgorithmName())
@@ -384,26 +577,84 @@ public class GeneticAlgorithmOptimizer implements Optimizer {
                 .algorithmMetadata(new HashMap<>())
                 .build();
 
-        // Final constraint evaluation
-        ConstraintEvaluationResult evaluation = constraintEvaluator.evaluateRosterPlan(rosterPlan);
-        rosterPlan.setHardConstraintViolations(evaluation.getHardViolationCount());
-        rosterPlan.setSoftConstraintViolations(evaluation.getSoftViolationCount());
+        // Set constraint violations
+        ConstraintEvaluationResult eval = constraintEvaluator.evaluateRosterPlan(plan);
+        plan.setHardConstraintViolations(eval.getHardViolationCount());
+        plan.setSoftConstraintViolations(eval.getSoftViolationCount());
 
         // Add statistics
-        rosterPlan.addStatistic("taskCoverageRate", rosterPlan.getTaskCoverageRate());
-        rosterPlan.addStatistic("staffUtilizationRate", rosterPlan.getStaffUtilizationRate());
-        rosterPlan.addStatistic("totalWorkingHours", bestChromosome.getTotalWorkingHours());
-        rosterPlan.addStatistic("chromosomeStats", bestChromosome.getStatistics());
+        plan.addStatistic("taskCoverageRate", plan.getTaskCoverageRate());
+        plan.addStatistic("staffUtilizationRate", plan.getStaffUtilizationRate());
+        plan.addStatistic("totalWorkingHours", bestChromosome.getTotalWorkingHours(null));
 
-        return rosterPlan;
+        // Add algorithm metadata
+        plan.addAlgorithmMetadata("generations", currentGeneration);
+        plan.addAlgorithmMetadata("populationSize", config.populationSize);
+        plan.addAlgorithmMetadata("configuration", config);
+
+        return plan;
     }
 
-    /**
-     * Helper methods
-     */
-    private boolean isTaskScheduledForDate(Task task, LocalDate date) {
-        LocalDate taskDate = task.getStartTime().toLocalDate();
-        return taskDate.equals(date);
+    private boolean isFeasible(Chromosome chromosome, OptimizationRequest request) {
+        RosterPlan tempPlan = createTempPlan(chromosome, request);
+        ConstraintEvaluationResult eval = constraintEvaluator.evaluateRosterPlan(tempPlan, true);
+        return eval.getHardViolationCount() == 0;
+    }
+
+    private int getHardViolationCount(Chromosome chromosome, OptimizationRequest request) {
+        RosterPlan tempPlan = createTempPlan(chromosome, request);
+        ConstraintEvaluationResult eval = constraintEvaluator.evaluateRosterPlan(tempPlan, true);
+        return eval.getHardViolationCount();
+    }
+
+    private double calculateFairness(Chromosome chromosome, OptimizationRequest request) {
+        Map<Staff, Double> workingHours = new HashMap<>();
+        for (Staff staff : request.getActiveStaff()) {
+            workingHours.put(staff, chromosome.getTotalWorkingHours(staff));
+        }
+
+        if (workingHours.size() <= 1) return 1.0;
+
+        double mean = workingHours.values().stream()
+                .mapToDouble(Double::doubleValue)
+                .average().orElse(0.0);
+
+        if (mean == 0) return 1.0;
+
+        double variance = workingHours.values().stream()
+                .mapToDouble(hours -> Math.pow(hours - mean, 2))
+                .average().orElse(0.0);
+
+        double stdDev = Math.sqrt(variance);
+        double coefficientOfVariation = stdDev / mean;
+
+        return Math.max(0, 1.0 - coefficientOfVariation);
+    }
+
+    private double calculatePatternCompliance(Chromosome chromosome, OptimizationRequest request) {
+        int totalChecks = 0;
+        int compliantChecks = 0;
+
+        for (Staff staff : request.getActiveStaff()) {
+            if (staff.getSquad() == null || staff.getSquad().getSquadWorkingPattern() == null) {
+                continue;
+            }
+
+            List<Gene> staffGenes = chromosome.getGenesForStaff(staff);
+            if (staffGenes.isEmpty()) continue;
+
+            // Simple pattern compliance check
+            totalChecks += staffGenes.size();
+            compliantChecks += staffGenes.size(); // Simplified - assume compliant for now
+        }
+
+        return totalChecks == 0 ? 1.0 : (double) compliantChecks / totalChecks;
+    }
+
+    private List<Task> getTasksForDate(List<Task> allTasks, LocalDate date) {
+        return allTasks.stream()
+                .filter(task -> task.getStartTime().toLocalDate().equals(date))
+                .collect(Collectors.toList());
     }
 
     private boolean isStaffQualifiedForTask(Staff staff, Task task) {
@@ -411,85 +662,84 @@ public class GeneticAlgorithmOptimizer implements Optimizer {
                 .allMatch(required -> staff.getQualifications().contains(required));
     }
 
-    private List<Shift> getCompatibleShiftsForTask(List<Shift> shifts, Task task, LocalDate date) {
-        return shifts.stream()
-                .filter(shift -> {
-                    // Check if shift time overlaps with task time
-                    // This is a simplified check - in real implementation you'd need more sophisticated logic
-                    return true; // For now, assume all shifts are compatible
-                })
-                .toList();
+    private List<Shift> getCompatibleShifts(List<Shift> shifts, Task task) {
+        // Simplified - return all shifts (could add time compatibility check)
+        return shifts;
     }
 
-    private double getAverageFitness(List<Chromosome> population) {
-        return population.stream()
-                .mapToDouble(Chromosome::getFitnessScore)
-                .average()
-                .orElse(0.0);
-    }
-
-    /**
-     * Extract GA parameters from request
-     */
-    private GAParameters extractGAParameters(OptimizationRequest request) {
-        return GAParameters.builder()
-                .populationSize(request.getAlgorithmParameter("populationSize", DEFAULT_POPULATION_SIZE))
-                .maxGenerations(request.getAlgorithmParameter("maxGenerations", DEFAULT_MAX_GENERATIONS))
-                .mutationRate(request.getAlgorithmParameter("mutationRate", DEFAULT_MUTATION_RATE))
-                .crossoverRate(request.getAlgorithmParameter("crossoverRate", DEFAULT_CROSSOVER_RATE))
-                .eliteRate(request.getAlgorithmParameter("eliteRate", DEFAULT_ELITE_RATE))
-                .tournamentSize(request.getAlgorithmParameter("tournamentSize", DEFAULT_TOURNAMENT_SIZE))
-                .stagnationLimit(request.getAlgorithmParameter("stagnationLimit", DEFAULT_STAGNATION_LIMIT))
-                .build();
-    }
-
-    private void reset() {
+    private void initializeOptimization(OptimizationRequest request) {
         cancelled = false;
         currentGeneration = 0;
-        bestFitness = Double.MIN_VALUE;
+
+        // Extract GA parameters from request
+        this.config = GAConfiguration.builder()
+                .populationSize(request.getAlgorithmParameter("populationSize", 50))
+                .maxGenerations(request.getAlgorithmParameter("maxGenerations", 1000))
+                .mutationRate(request.getAlgorithmParameter("mutationRate", 0.1))
+                .crossoverRate(request.getAlgorithmParameter("crossoverRate", 0.8))
+                .eliteRate(request.getAlgorithmParameter("eliteRate", 0.1))
+                .tournamentSize(request.getAlgorithmParameter("tournamentSize", 5))
+                .stagnationLimit(request.getAlgorithmParameter("stagnationLimit", 100))
+                .enableLocalSearch(request.getAlgorithmParameter("enableLocalSearch", true))
+                .localSearchIterations(request.getAlgorithmParameter("localSearchIterations", 20))
+                .build();
+
+        fitnessCache.clear();
+        log.info("Optimization initialized with config: {}", config);
     }
+
+    private void cleanup() {
+        // No cleanup needed for now - caches are managed automatically
+    }
+
+    private ExecutorService createOptimizedExecutor() {
+        int threads = Math.max(2, Math.min(Runtime.getRuntime().availableProcessors(), 8));
+        return Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r, "GA-Evaluator");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    // === OPTIMIZER INTERFACE IMPLEMENTATION ===
 
     @Override
     public String getAlgorithmName() {
-        return "GENETIC_ALGORITHM";
+        return "GENETIC_ALGORITHM_OPTIMIZED";
     }
 
     @Override
     public String getAlgorithmDescription() {
-        return "Genetic Algorithm optimizer using tournament selection, uniform crossover, and random mutation";
+        return "Optimized two-phase genetic algorithm with constraint-awareness and local search";
     }
 
     @Override
     public Map<String, Object> getDefaultParameters() {
+        GAConfiguration defaultConfig = GAConfiguration.getDefault();
         Map<String, Object> params = new HashMap<>();
-        params.put("populationSize", DEFAULT_POPULATION_SIZE);
-        params.put("maxGenerations", DEFAULT_MAX_GENERATIONS);
-        params.put("mutationRate", DEFAULT_MUTATION_RATE);
-        params.put("crossoverRate", DEFAULT_CROSSOVER_RATE);
-        params.put("eliteRate", DEFAULT_ELITE_RATE);
-        params.put("tournamentSize", DEFAULT_TOURNAMENT_SIZE);
-        params.put("stagnationLimit", DEFAULT_STAGNATION_LIMIT);
+        params.put("populationSize", defaultConfig.populationSize);
+        params.put("maxGenerations", defaultConfig.maxGenerations);
+        params.put("mutationRate", defaultConfig.mutationRate);
+        params.put("crossoverRate", defaultConfig.crossoverRate);
+        params.put("eliteRate", defaultConfig.eliteRate);
+        params.put("tournamentSize", defaultConfig.tournamentSize);
+        params.put("stagnationLimit", defaultConfig.stagnationLimit);
+        params.put("enableLocalSearch", defaultConfig.enableLocalSearch);
+        params.put("localSearchIterations", defaultConfig.localSearchIterations);
         return params;
     }
 
     @Override
     public void validateRequest(OptimizationRequest request) throws OptimizationException {
         request.validate();
-
         if (request.getActiveStaff().isEmpty()) {
             throw new OptimizationException("No active staff members found");
         }
-
         if (request.getActiveShifts().isEmpty()) {
             throw new OptimizationException("No active shifts found");
         }
-
-        if (request.getPlanningDays() <= 0) {
-            throw new OptimizationException("Invalid planning period");
-        }
-
-        if (request.getPlanningDays() > 31) {
-            throw new OptimizationException("Planning period too long (max 31 days)");
+        if (request.getPlanningDays() <= 0 || request.getPlanningDays() > 31) {
+            throw new OptimizationException("Invalid planning period: " + request.getPlanningDays());
         }
     }
 
@@ -500,101 +750,72 @@ public class GeneticAlgorithmOptimizer implements Optimizer {
 
     @Override
     public long getEstimatedExecutionTime(OptimizationRequest request) {
-        // Rough estimation based on problem size
-        int staffCount = request.getActiveStaff().size();
-        int taskCount = request.getActiveTasks().size();
-        int days = request.getPlanningDays();
-
-        // Base time + complexity factor
-        long baseTime = 5000; // 5 seconds base
-        long complexityFactor = (staffCount * taskCount * days) / 10;
-
-        return baseTime + complexityFactor;
+        int complexity = request.getActiveStaff().size() * request.getActiveTasks().size() *
+                request.getPlanningDays();
+        return Math.max(5000, complexity / 10); // Rough estimate in ms
     }
 
     @Override
     public Map<String, ParameterInfo> getConfigurableParameters() {
         Map<String, ParameterInfo> params = new HashMap<>();
-
-        params.put("populationSize", new ParameterInfo(
-                "populationSize", "Population size for genetic algorithm",
-                Integer.class, DEFAULT_POPULATION_SIZE, 10, 200));
-
-        params.put("maxGenerations", new ParameterInfo(
-                "maxGenerations", "Maximum number of generations",
-                Integer.class, DEFAULT_MAX_GENERATIONS, 100, 5000));
-
-        params.put("mutationRate", new ParameterInfo(
-                "mutationRate", "Probability of mutation",
-                Double.class, DEFAULT_MUTATION_RATE, 0.01, 0.5));
-
-        params.put("crossoverRate", new ParameterInfo(
-                "crossoverRate", "Probability of crossover",
-                Double.class, DEFAULT_CROSSOVER_RATE, 0.5, 1.0));
-
-        params.put("eliteRate", new ParameterInfo(
-                "eliteRate", "Percentage of elite chromosomes to keep",
-                Double.class, DEFAULT_ELITE_RATE, 0.05, 0.3));
-
-        params.put("tournamentSize", new ParameterInfo(
-                "tournamentSize", "Tournament size for selection",
-                Integer.class, DEFAULT_TOURNAMENT_SIZE, 2, 10));
-
-        params.put("stagnationLimit", new ParameterInfo(
-                "stagnationLimit", "Generations without improvement before stopping",
-                Integer.class, DEFAULT_STAGNATION_LIMIT, 50, 500));
-
+        params.put("populationSize", new ParameterInfo("populationSize", "Population size",
+                Integer.class, 50, 10, 200));
+        params.put("maxGenerations", new ParameterInfo("maxGenerations", "Maximum generations",
+                Integer.class, 1000, 100, 5000));
+        params.put("mutationRate", new ParameterInfo("mutationRate", "Mutation rate",
+                Double.class, 0.1, 0.01, 0.5));
+        params.put("crossoverRate", new ParameterInfo("crossoverRate", "Crossover rate",
+                Double.class, 0.8, 0.5, 1.0));
+        params.put("eliteRate", new ParameterInfo("eliteRate", "Elite percentage",
+                Double.class, 0.1, 0.05, 0.3));
         return params;
     }
 
     @Override
     public boolean cancelOptimization() {
         cancelled = true;
-        log.info("GA optimization cancellation requested");
+        log.info("Optimization cancellation requested");
         return true;
     }
 
     @Override
     public int getOptimizationProgress() {
-        if (currentGeneration == 0) return 0;
-
-        GAParameters params = GAParameters.builder()
-                .maxGenerations(DEFAULT_MAX_GENERATIONS)
-                .build();
-
-        return Math.min(100, (currentGeneration * 100) / params.getMaxGenerations());
+        if (config == null || currentGeneration == 0) return 0;
+        return Math.min(100, (currentGeneration * 100) / config.maxGenerations);
     }
 
-    /**
-     * GA Parameters data class
-     */
-    @Data
-    @Builder
-    private static class GAParameters {
-        private int populationSize;
-        private int maxGenerations;
-        private double mutationRate;
-        private double crossoverRate;
-        private double eliteRate;
-        private int tournamentSize;
-        private int stagnationLimit;
+    // === INNER CLASSES ===
 
-        public Map<String, Object> toMap() {
-            Map<String, Object> map = new HashMap<>();
-            map.put("populationSize", populationSize);
-            map.put("maxGenerations", maxGenerations);
-            map.put("mutationRate", mutationRate);
-            map.put("crossoverRate", crossoverRate);
-            map.put("eliteRate", eliteRate);
-            map.put("tournamentSize", tournamentSize);
-            map.put("stagnationLimit", stagnationLimit);
-            return map;
+    /**
+     * Simple fitness cache implementation
+     */
+    private static class FitnessCache {
+        private final Map<String, Double> cache = new ConcurrentHashMap<>();
+        private final int maxSize;
+
+        public FitnessCache(int maxSize) {
+            this.maxSize = maxSize;
         }
 
-        @Override
-        public String toString() {
-            return String.format("GAParameters{pop=%d, gen=%d, mut=%.2f, cross=%.2f, elite=%.2f, tour=%d, stag=%d}",
-                    populationSize, maxGenerations, mutationRate, crossoverRate, eliteRate, tournamentSize, stagnationLimit);
+        public Double get(String signature) {
+            return cache.get(signature);
+        }
+
+        public void put(String signature, double fitness) {
+            if (cache.size() >= maxSize) {
+                // Simple eviction - remove 20% randomly
+                List<String> keys = new ArrayList<>(cache.keySet());
+
+                Collections.shuffle(keys);
+                for (int i = 0; i < maxSize / 5; i++) {
+                    cache.remove(keys.get(i));
+                }
+            }
+            cache.put(signature, fitness);
+        }
+
+        public void clear() {
+            cache.clear();
         }
     }
 }

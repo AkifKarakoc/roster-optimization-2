@@ -24,6 +24,14 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
 
     // Find active tasks ordered by start time
     List<Task> findByActiveTrueOrderByStartTimeAsc();
+    
+    // Find active tasks with required qualifications loaded
+    @Query("SELECT DISTINCT t FROM Task t LEFT JOIN FETCH t.requiredQualifications WHERE t.active = true ORDER BY t.startTime ASC")
+    List<Task> findByActiveTrueWithQualificationsOrderByStartTimeAsc();
+    
+    // Find task by ID with required qualifications loaded
+    @Query("SELECT t FROM Task t LEFT JOIN FETCH t.requiredQualifications WHERE t.id = :id")
+    Optional<Task> findByIdWithQualifications(@Param("id") Long id);
 
     // Find active tasks ordered by priority, then start time
     List<Task> findByActiveTrueOrderByPriorityAscStartTimeAsc();

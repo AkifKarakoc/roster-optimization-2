@@ -93,8 +93,12 @@ public class TaskService {
      */
     @Transactional(readOnly = true)
     public TaskDTO findById(Long id) {
-        Task task = taskRepository.findById(id)
+        Task task = taskRepository.findByIdWithQualifications(id)
                 .orElseThrow(() -> new IllegalArgumentException("Task not found with ID: " + id));
+
+        log.info("TaskService.findById - Task '{}' loaded with {} qualifications", 
+                task.getName(), 
+                task.getRequiredQualifications() != null ? task.getRequiredQualifications().size() : 0);
 
         return taskMapper.toDto(task);
     }
@@ -104,7 +108,14 @@ public class TaskService {
      */
     @Transactional(readOnly = true)
     public List<TaskDTO> findAll() {
-        List<Task> tasks = taskRepository.findByActiveTrueOrderByStartTimeAsc();
+        List<Task> tasks = taskRepository.findByActiveTrueWithQualificationsOrderByStartTimeAsc();
+        
+        // Debug log - check qualifications loaded
+        tasks.forEach(task -> {
+            int qualCount = task.getRequiredQualifications() != null ? task.getRequiredQualifications().size() : 0;
+            log.info("TaskService.findAll - Task '{}' loaded with {} qualifications", task.getName(), qualCount);
+        });
+        
         return taskMapper.toDtoList(tasks);
     }
 
@@ -113,7 +124,15 @@ public class TaskService {
      */
     @Transactional(readOnly = true)
     public List<TaskDTO> findAllByPriority() {
-        List<Task> tasks = taskRepository.findByActiveTrueOrderByPriorityAscStartTimeAsc();
+        // Use WITH qualifications method and sort by priority in Java
+        List<Task> tasks = taskRepository.findByActiveTrueWithQualificationsOrderByStartTimeAsc();
+        
+        // Sort by priority, then by start time
+        tasks.sort((t1, t2) -> {
+            int priorityCompare = Integer.compare(t1.getPriority(), t2.getPriority());
+            return priorityCompare != 0 ? priorityCompare : t1.getStartTime().compareTo(t2.getStartTime());
+        });
+        
         return taskMapper.toDtoList(tasks);
     }
 
@@ -123,6 +142,14 @@ public class TaskService {
     @Transactional(readOnly = true)
     public List<TaskDTO> findAllIncludingInactive() {
         List<Task> tasks = taskRepository.findAllByOrderByStartTimeAsc();
+        
+        // Manual qualification loading for inactive tasks (no specific query yet)
+        tasks.forEach(task -> {
+            if (task.getRequiredQualifications() != null) {
+                task.getRequiredQualifications().size(); // Force lazy loading
+            }
+        });
+        
         return taskMapper.toDtoList(tasks);
     }
 
