@@ -3,6 +3,8 @@ package com.rosteroptimization.service.optimization.model;
 import com.rosteroptimization.entity.Staff;
 import com.rosteroptimization.entity.Task;
 import com.rosteroptimization.entity.Shift;
+import com.rosteroptimization.service.optimization.model.Assignment;
+import com.rosteroptimization.service.optimization.model.OptimizationRequest;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -12,9 +14,6 @@ import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
-/**
- * Optimized Chromosome with integrated operators and factory methods
- */
 @Data
 @NoArgsConstructor
 @Slf4j
@@ -24,7 +23,6 @@ public class Chromosome {
     private double fitnessScore = 0.0;
     private boolean fitnessCalculated = false;
 
-    // Lazy-loaded caches
     private transient Map<Staff, List<Gene>> genesByStaff;
     private transient Map<LocalDate, List<Gene>> genesByDate;
     private transient String signatureCache;
@@ -37,14 +35,10 @@ public class Chromosome {
 
     // === FACTORY METHODS ===
 
-    /**
-     * Create random chromosome with basic constraint awareness
-     */
     public static Chromosome createRandom(Map<String, List<Gene>> groupedGenes, OptimizationRequest request) {
         Map<String, Gene> selected = new HashMap<>();
         Map<Long, WorkloadTracker> trackers = initializeTrackers(request.getActiveStaff());
 
-        // Process dates sequentially for better constraint adherence
         List<LocalDate> dates = request.getStartDate()
                 .datesUntil(request.getEndDate().plusDays(1))
                 .sorted()
@@ -66,15 +60,10 @@ public class Chromosome {
         return new Chromosome(new ArrayList<>(selected.values()));
     }
 
-    /**
-     * Create constraint-aware chromosome
-     */
-    public static Chromosome createConstraintAware(Map<String, List<Gene>> groupedGenes,
-                                                   OptimizationRequest request) {
+    public static Chromosome createConstraintAware(Map<String, List<Gene>> groupedGenes, OptimizationRequest request) {
         Map<String, Gene> selected = new HashMap<>();
         Map<Long, WorkloadTracker> trackers = initializeTrackers(request.getActiveStaff());
 
-        // Get dates sorted
         List<LocalDate> dates = request.getStartDate()
                 .datesUntil(request.getEndDate().plusDays(1))
                 .sorted()
@@ -84,15 +73,14 @@ public class Chromosome {
         for (LocalDate date : dates) {
             List<Task> dayTasks = request.getActiveTasks().stream()
                     .filter(task -> task.getStartTime().toLocalDate().equals(date))
-                    .filter(task -> task.getPriority() <= 2) // High priority only
+                    .filter(task -> task.getPriority() <= 2)
                     .sorted(Comparator.comparingInt(Task::getPriority))
                     .collect(Collectors.toList());
 
             Set<Long> assignedStaffIds = new HashSet<>();
 
             for (Task task : dayTasks) {
-                Optional<Staff> bestStaff = findBestStaffForTask(task, request.getActiveStaff(),
-                        trackers, assignedStaffIds);
+                Optional<Staff> bestStaff = findBestStaffForTask(task, request.getActiveStaff(), trackers, assignedStaffIds);
 
                 if (bestStaff.isPresent()) {
                     Staff staff = bestStaff.get();
@@ -100,7 +88,7 @@ public class Chromosome {
 
                     Optional<Gene> taskGene = groupedGenes.getOrDefault(key, Collections.emptyList())
                             .stream()
-                            .filter(g -> g.hasTask() && g.getTask().equals(task))
+                            .filter(g -> g.hasTasks() && g.getTasks().contains(task))
                             .filter(g -> trackers.get(staff.getId()).canAccommodate(g))
                             .findFirst();
 
@@ -133,15 +121,11 @@ public class Chromosome {
 
     // === GENETIC OPERATORS ===
 
-    /**
-     * Smart crossover with domain knowledge
-     */
     public Chromosome crossover(Chromosome other) {
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
-        // Determine crossover strategy based on fitness difference
         double fitnessDiff = Math.abs(this.fitnessScore - other.fitnessScore);
-        boolean useFitnessWeighted = fitnessDiff > 100; // Significant difference
+        boolean useFitnessWeighted = fitnessDiff > 100;
 
         Map<String, Gene> thisGenes = this.genes.stream()
                 .collect(Collectors.toMap(Gene::getGeneId, g -> g));
@@ -161,8 +145,8 @@ public class Chromosome {
             Gene selected = selectBetterGene(gene1, gene2, assignedTasks, useFitnessWeighted, random);
             if (selected != null) {
                 offspringGenes.add(selected.copy());
-                if (selected.hasTask()) {
-                    assignedTasks.add(selected.getTask());
+                if (selected.hasTasks()) {
+                    assignedTasks.addAll(selected.getTasks());
                 }
             }
         }
@@ -170,15 +154,11 @@ public class Chromosome {
         return new Chromosome(offspringGenes);
     }
 
-    /**
-     * Intelligent mutation
-     */
     public void mutate(Map<String, List<Gene>> groupedGenes, double mutationRate) {
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
         if (genes.isEmpty() || random.nextDouble() > mutationRate) return;
 
-        // Select mutation target intelligently
         int targetIndex = selectMutationTarget(random);
         Gene oldGene = genes.get(targetIndex);
         String key = oldGene.getGeneId();
@@ -186,22 +166,55 @@ public class Chromosome {
         List<Gene> alternatives = groupedGenes.getOrDefault(key, Collections.emptyList());
         if (alternatives.size() <= 1) return;
 
-        // Filter valid alternatives
         List<Gene> validAlternatives = alternatives.stream()
                 .filter(g -> !g.equals(oldGene))
                 .collect(Collectors.toList());
 
         if (validAlternatives.isEmpty()) return;
 
-        // Smart selection based on current gene problems
         Gene newGene = selectBetterMutation(oldGene, validAlternatives, random);
         genes.set(targetIndex, newGene);
         invalidateCache();
     }
 
-    /**
-     * Basic repair to fix obvious conflicts
-     */
+    public boolean balanceWorkloads() {
+        Map<Staff, Double> workloadMap = new HashMap<>();
+        Map<Staff, List<Gene>> staffGeneMap = new HashMap<>();
+
+        for (Gene gene : genes) {
+            Staff staff = gene.getStaff();
+            double hours = gene.getWorkingHours();
+            workloadMap.merge(staff, hours, Double::sum);
+            staffGeneMap.computeIfAbsent(staff, k -> new ArrayList<>()).add(gene);
+        }
+
+        double avgWorkload = workloadMap.values().stream().mapToDouble(Double::doubleValue).average().orElse(0);
+        List<Staff> overworked = workloadMap.entrySet().stream()
+                .filter(e -> e.getValue() > avgWorkload + 5)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toList());
+
+        List<Staff> underutilized = workloadMap.entrySet().stream()
+                .filter(e -> e.getValue() < avgWorkload - 5)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toList());
+
+        if (overworked.isEmpty() || underutilized.isEmpty()) return false;
+
+        for (Staff over : overworked) {
+            for (Staff under : underutilized) {
+                if (tryWorkloadSwap(over, under, staffGeneMap)) {
+                    invalidateCache();
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // === REPAIR METHODS ===
+
     public void repairBasic() {
         Map<String, Gene> uniqueGenes = new HashMap<>();
         List<Gene> duplicates = new ArrayList<>();
@@ -227,13 +240,9 @@ public class Chromosome {
         }
     }
 
-    /**
-     * Advanced repair with constraint awareness
-     */
     public void repairAdvanced() {
         repairBasic();
 
-        // Fix obvious constraint violations
         Map<Long, List<Gene>> staffGenes = genes.stream()
                 .filter(g -> !g.isDayOff())
                 .collect(Collectors.groupingBy(g -> g.getStaff().getId()));
@@ -243,24 +252,21 @@ public class Chromosome {
         for (Map.Entry<Long, List<Gene>> entry : staffGenes.entrySet()) {
             List<Gene> workingGenes = entry.getValue();
 
-            // Fix daily hour violations (simple check)
             Map<LocalDate, Double> dailyHours = workingGenes.stream()
                     .collect(Collectors.groupingBy(Gene::getDate,
                             Collectors.summingDouble(Gene::getWorkingHours)));
 
             dailyHours.entrySet().stream()
-                    .filter(e -> e.getValue() > 12) // Max 12 hours per day
+                    .filter(e -> e.getValue() > 12)
                     .forEach(e -> {
-                        // Find genes to convert to day off
                         workingGenes.stream()
                                 .filter(g -> g.getDate().equals(e.getKey()))
-                                .filter(g -> !g.hasTask()) // Don't remove task assignments
+                                .filter(g -> !g.hasTasks())
                                 .findFirst()
                                 .ifPresent(toModify::add);
                     });
         }
 
-        // Convert problematic genes to day off
         for (Gene gene : toModify) {
             int index = genes.indexOf(gene);
             if (index >= 0) {
@@ -274,11 +280,25 @@ public class Chromosome {
         }
     }
 
+    public boolean hasBasicViolations() {
+        Map<String, Gene> geneMap = new HashMap<>();
+        for (Gene gene : genes) {
+            String key = gene.getGeneId();
+            if (geneMap.containsKey(key)) {
+                return true; // Duplicate found
+            }
+            geneMap.put(key, gene);
+        }
+        return false;
+    }
+
+    public boolean isFeasible(OptimizationRequest request) {
+        // Basic feasibility check - no duplicate assignments
+        return !hasBasicViolations() && getUnassignedTasks(request.getActiveTasks()).size() < request.getActiveTasks().size() * 0.5;
+    }
+
     // === CORE FUNCTIONALITY ===
 
-    /**
-     * Convert to assignments
-     */
     public List<Assignment> toAssignments() {
         return genes.stream()
                 .filter(Gene::isWorkingDay)
@@ -287,13 +307,10 @@ public class Chromosome {
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Get unassigned tasks
-     */
     public List<Task> getUnassignedTasks(List<Task> allTasks) {
         Set<Task> assignedTasks = genes.stream()
-                .filter(Gene::hasTask)
-                .map(Gene::getTask)
+                .filter(Gene::hasTasks)
+                .flatMap(g -> g.getTasks().stream())
                 .collect(Collectors.toSet());
 
         return allTasks.stream()
@@ -301,9 +318,6 @@ public class Chromosome {
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Get genes for staff (cached)
-     */
     public List<Gene> getGenesForStaff(Staff staff) {
         if (genesByStaff == null) {
             genesByStaff = genes.stream()
@@ -312,9 +326,6 @@ public class Chromosome {
         return genesByStaff.getOrDefault(staff, Collections.emptyList());
     }
 
-    /**
-     * Get genes for date (cached)
-     */
     public List<Gene> getGenesForDate(LocalDate date) {
         if (genesByDate == null) {
             genesByDate = genes.stream()
@@ -323,27 +334,34 @@ public class Chromosome {
         return genesByDate.getOrDefault(date, Collections.emptyList());
     }
 
-    /**
-     * Get total working hours for staff
-     */
     public double getTotalWorkingHours(Staff staff) {
         return getGenesForStaff(staff).stream()
                 .mapToDouble(Gene::getWorkingHours)
                 .sum();
     }
 
-    /**
-     * Get working days count for staff
-     */
     public int getWorkingDaysCount(Staff staff) {
         return (int) getGenesForStaff(staff).stream()
                 .filter(Gene::isWorkingDay)
                 .count();
     }
 
-    /**
-     * Get chromosome signature for caching
-     */
+    public double getWorkloadImbalanceScore() {
+        Map<Staff, Double> workloads = new HashMap<>();
+        for (Gene gene : genes) {
+            workloads.merge(gene.getStaff(), gene.getWorkingHours(), Double::sum);
+        }
+
+        if (workloads.size() <= 1) return 0;
+
+        double mean = workloads.values().stream().mapToDouble(Double::doubleValue).average().orElse(0);
+        double variance = workloads.values().stream()
+                .mapToDouble(w -> Math.pow(w - mean, 2))
+                .average().orElse(0);
+
+        return Math.sqrt(variance);
+    }
+
     public String getSignature() {
         if (signatureCache == null && !genes.isEmpty()) {
             signatureCache = genes.stream()
@@ -351,16 +369,15 @@ public class Chromosome {
                             gene.getStaff().getId(),
                             gene.getDate(),
                             gene.getShift() != null ? gene.getShift().getId() : "0",
-                            gene.getTask() != null ? gene.getTask().getId() : "0"))
+                            gene.hasTasks() ? gene.getTasks().stream()
+                                    .map(t -> t.getId().toString())
+                                    .collect(Collectors.joining(",")) : "0"))
                     .sorted()
                     .collect(Collectors.joining("|"));
         }
         return signatureCache != null ? signatureCache : "EMPTY";
     }
 
-    /**
-     * Deep copy
-     */
     public Chromosome copy() {
         List<Gene> copiedGenes = genes.stream()
                 .map(Gene::copy)
@@ -383,7 +400,6 @@ public class Chromosome {
     private static Gene selectSmartRandom(List<Gene> candidates, WorkloadTracker tracker) {
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
-        // If tracker suggests rest, prefer day off
         if (tracker.shouldRest()) {
             Optional<Gene> dayOff = candidates.stream()
                     .filter(Gene::isDayOff)
@@ -391,7 +407,6 @@ public class Chromosome {
             if (dayOff.isPresent()) return dayOff.get();
         }
 
-        // Weighted random selection
         List<Gene> weighted = new ArrayList<>();
         for (Gene gene : candidates) {
             int weight = getGeneWeight(gene, tracker);
@@ -404,7 +419,6 @@ public class Chromosome {
     }
 
     private static Gene selectConstraintCompliant(List<Gene> candidates, WorkloadTracker tracker) {
-        // Must rest
         if (tracker.mustRest()) {
             return candidates.stream()
                     .filter(Gene::isDayOff)
@@ -412,16 +426,14 @@ public class Chromosome {
                     .orElse(candidates.get(0));
         }
 
-        // Prefer task genes if can accommodate
         List<Gene> taskGenes = candidates.stream()
-                .filter(g -> g.hasTask() && tracker.canAccommodate(g))
+                .filter(g -> g.hasTasks() && tracker.canAccommodate(g))
                 .collect(Collectors.toList());
 
         if (!taskGenes.isEmpty()) {
             return taskGenes.get(ThreadLocalRandom.current().nextInt(taskGenes.size()));
         }
 
-        // Fallback to any compatible gene
         return candidates.stream()
                 .filter(g -> tracker.canAccommodate(g))
                 .findFirst()
@@ -445,28 +457,24 @@ public class Chromosome {
         if (gene1 == null) return gene2;
         if (gene2 == null) return gene1;
 
-        // Avoid task conflicts
-        if (gene1.hasTask() && assignedTasks.contains(gene1.getTask())) {
-            return gene2.hasTask() && assignedTasks.contains(gene2.getTask()) ?
+        if (gene1.hasTasks() && gene1.getTasks().stream().anyMatch(assignedTasks::contains)) {
+            return gene2.hasTasks() && gene2.getTasks().stream().anyMatch(assignedTasks::contains) ?
                     (gene1.isDayOff() ? gene1 : gene2.isDayOff() ? gene2 : null) : gene2;
         }
-        if (gene2.hasTask() && assignedTasks.contains(gene2.getTask())) {
+        if (gene2.hasTasks() && gene2.getTasks().stream().anyMatch(assignedTasks::contains)) {
             return gene1;
         }
 
-        // Prefer task-bearing genes
-        if (gene1.hasTask() && !gene2.hasTask()) return gene1;
-        if (gene2.hasTask() && !gene1.hasTask()) return gene2;
+        if (gene1.hasTasks() && !gene2.hasTasks()) return gene1;
+        if (gene2.hasTasks() && !gene1.hasTasks()) return gene2;
 
-        // Random selection for similar genes
         return random.nextBoolean() ? gene1 : gene2;
     }
 
     private int selectMutationTarget(ThreadLocalRandom random) {
-        // Prefer non-task genes for mutation (less disruptive)
         List<Integer> nonTaskIndices = new ArrayList<>();
         for (int i = 0; i < genes.size(); i++) {
-            if (!genes.get(i).hasTask()) {
+            if (!genes.get(i).hasTasks()) {
                 nonTaskIndices.add(i);
             }
         }
@@ -479,7 +487,6 @@ public class Chromosome {
     }
 
     private Gene selectBetterMutation(Gene oldGene, List<Gene> alternatives, ThreadLocalRandom random) {
-        // If old gene is problematic (long hours), prefer day off
         if (!oldGene.isDayOff() && oldGene.getWorkingHours() > 10) {
             Optional<Gene> dayOff = alternatives.stream()
                     .filter(Gene::isDayOff)
@@ -489,7 +496,6 @@ public class Chromosome {
             }
         }
 
-        // Prefer shorter shifts if current is long
         if (!oldGene.isDayOff() && oldGene.getWorkingHours() > 8) {
             Optional<Gene> shorter = alternatives.stream()
                     .filter(g -> !g.isDayOff() && g.getWorkingHours() < oldGene.getWorkingHours())
@@ -499,20 +505,19 @@ public class Chromosome {
             }
         }
 
-        // Random selection
         return alternatives.get(random.nextInt(alternatives.size()));
     }
 
     private int getGenePriority(Gene gene) {
         if (gene.isDayOff()) return 0;
-        if (gene.hasTask()) return 2;
+        if (gene.hasTasks()) return 2;
         return 1;
     }
 
     private static int getGeneWeight(Gene gene, WorkloadTracker tracker) {
         if (gene.isDayOff()) {
             return tracker.shouldRest() ? 4 : 2;
-        } else if (gene.hasTask()) {
+        } else if (gene.hasTasks()) {
             return tracker.canAccommodateTask() ? 3 : 1;
         } else {
             return tracker.canAccommodate(gene) ? 2 : 1;
@@ -526,6 +531,58 @@ public class Chromosome {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private boolean tryWorkloadSwap(Staff overworked, Staff underutilized,
+                                    Map<Staff, List<Gene>> staffGeneMap) {
+        if (!overworked.getDepartment().getId().equals(underutilized.getDepartment().getId())) {
+            return false;
+        }
+
+        List<Gene> overGenes = staffGeneMap.get(overworked);
+        List<Gene> underGenes = staffGeneMap.get(underutilized);
+
+        for (Gene overGene : overGenes) {
+            if (overGene.isDayOff() || !overGene.hasTasks()) continue;
+
+            Optional<Gene> swappableUnder = underGenes.stream()
+                    .filter(g -> g.getDate().equals(overGene.getDate()))
+                    .filter(g -> g.isDayOff() || (!g.hasTasks() && isShiftCompatible(g, overGene)))
+                    .filter(g -> areTasksCompatible(overGene.getTasks(), underutilized))
+                    .findFirst();
+
+            if (swappableUnder.isPresent()) {
+                Gene underGene = swappableUnder.get();
+
+                Gene newOverGene = underGene.isDayOff() ?
+                        Gene.createDayOffGene(overworked, underGene.getDate()) :
+                        Gene.createShiftOnlyGene(overworked, underGene.getDate(), underGene.getShift());
+
+                Gene newUnderGene = Gene.createShiftWithMultipleTasksGene(
+                        underutilized, overGene.getDate(), overGene.getShift(), overGene.getTasks());
+
+                int overIndex = genes.indexOf(overGene);
+                int underIndex = genes.indexOf(underGene);
+
+                genes.set(overIndex, newOverGene);
+                genes.set(underIndex, newUnderGene);
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isShiftCompatible(Gene g1, Gene g2) {
+        if (g1.getShift() == null || g2.getShift() == null) return false;
+        return Math.abs(g1.getWorkingHours() - g2.getWorkingHours()) <= 2;
+    }
+
+    private boolean areTasksCompatible(List<Task> tasks, Staff staff) {
+        return tasks.stream().allMatch(task ->
+                task.getRequiredQualifications().stream()
+                        .allMatch(req -> staff.getQualifications().contains(req)));
     }
 
     private void invalidateCache() {
@@ -542,9 +599,6 @@ public class Chromosome {
 
     // === HELPER CLASSES ===
 
-    /**
-     * Lightweight workload tracker for constraint checking
-     */
     private static class WorkloadTracker {
         private double weeklyHours = 0;
         private int consecutiveDays = 0;
